@@ -1,0 +1,632 @@
+#!/bin/bash
+# ==================================================
+_APP_SPECIFIC_NAME="Greynoise"
+_APP_VERSION="0.1"
+_APP_STATUS="beta"
+_APP_INFO="${_APP_SPECIFIC_NAME} (greynoise) is a bash script that uses GreyNoise API to check if an IP is known for malicious activity"
+_APP_VERSION_STATUS="${_APP_VERSION}-${_APP_STATUS}"
+_AUTHOR="Author: Arafat Ali | Email: arafat@sofibox.com | (C) 2019-2023"
+# Last update: 28 Jan 2023
+# ====================================================
+
+# This function is used to update script from a remote repository based on a given path
+# Usage: script_update [script_path]
+# Example: script_update /opt/maxigpg_public/
+script_update() {
+  local script_name script_path caller script_install_path current_configs new_configs
+
+  script_name="$(basename "${0}")"
+  # might not work with macOS
+  script_path="$(dirname "$(readlink -f "$0")")"
+  caller="${script_name}->${FUNCNAME[0]}"
+  script_install_path="${1}"
+
+  echo "[${caller}]: Updating $(basename -- "$0") to latest version ..."
+  # CD to ${script_path} and if does not exist exit with error
+  cd "${script_path}" || {
+    echo "[${caller}]: ERROR, could not change directory to ${script_path}"
+    exit 1
+  }
+  echo ""
+  echo "START git update information:"
+  git fetch --all
+  check_status "$?"
+  git reset --hard origin/main
+  check_status "$?"
+  echo "END git update information:"
+  echo ""
+
+  echo "[${caller}]: Updating ${script_name} configuration file ..."
+
+  current_configs=$(grep -E '^[A-Za-z0-9_].+=.+$' "${script_install_path}/${script_name}.conf" | awk -F "=" '{print $1}')
+  new_configs=$(grep -E '^[A-Za-z0-9_].+=.+$' "${script_install_path}/${script_name}.conf.sample" | awk -F "=" '{print $1}')
+
+  for new_config in ${new_configs}; do
+    if [[ ${current_configs} =~ ${new_config} ]]; then
+      :
+    else
+      echo "Adding new config: ${new_config} into ${script_install_path}/${script_name}.conf"
+      echo "${new_config}=\"\"" >>"${script_install_path}/${script_name}.conf"
+      check_status "$?"
+    fi
+  done
+
+  # Remove blank lines, comments and sort config file
+  grep -E '^[A-Za-z0-9_].+=.+$' "${script_install_path}/${script_name}.conf" | sort >"${script_install_path}/${script_name}.conf_tmp"
+  mv "${script_install_path}/${script_name}.conf_tmp" "${script_install_path}/${script_name}.conf"
+  check_status "$?"
+
+  echo "[${caller}]: Running ${script_name} --version ..."
+  chmod +x "${script_install_path}/${script_name}"
+  ${script_name} --version
+  check_status "$?"
+
+}
+
+check_update() {
+  local script_name script_path caller temp_file script_install_path
+  script_name="$(basename "${0}")"
+  script_path="$(dirname "$(readlink -f "$0")")"
+  caller="${script_name}->${FUNCNAME[0]}"
+  script_install_path="$(greynoise script-path)"
+  echo "[${caller}]: Checking ${script_name} for update..."
+  temp_file="${TEMP_PATH}/${script_name}"
+  # The github raw hosting will not be updated immediately after I push the update to github. Need to wait about 5 minutes
+  if ! command -v curl &>/dev/null; then
+    [[ "$(get_distro id)" == +(debian|ubuntu|centos|almalinux|rhel) ]] && apt-get install -y curl
+  fi
+  curl -H 'Cache-Control: no-cache' -so "${temp_file}" "https://raw.githubusercontent.com/sofibox/${script_name}/main/${script_name}"
+  check_status "$?"
+  available_version="$(awk -F'=' '/^_APP_VERSION=/{ print $2 }' "${temp_file}" | sed 's/\"//g')"
+  this_version="${_APP_VERSION}"
+  echo ""
+  echo "Installed version is: v${this_version}"
+  echo "Online version is: v${available_version}"
+  echo ""
+  if [[ "ok" == "$(echo | awk "(${available_version} > ${this_version}) { print \"ok\"; }")" ]]; then
+    echo "[${caller}]: A new version of ${script_name} is available."
+
+    read -r -p "[${caller}->input]: Do you want to update ${script_name} to version ${available_version}? [default:Y] [Y/n]: " response
+
+    if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+      script_update "${script_install_path}"
+    else
+      echo "[${caller}->cancel]: Operation aborted!"
+      exit 0
+    fi
+
+  elif [[ "ok" == "$(echo | awk "(${available_version} == ${this_version}) { print \"ok\"; }")" ]]; then
+    echo "[${caller}]: You are using the latest version of ${script_name}."
+  else
+    echo "[${caller}]: You are using a newer version of ${script_name} than the latest available."
+  fi
+
+  rm -f "${temp_file}"
+}
+
+# This function is used to handle exit trap that can accept multiple trap arguments
+# syntax: traps <traps_cleanup_function> SIG1 SIG2 SIG3 ... SIGN[N]
+# eg: traps exit_function QUIT INT TERM EXIT
+traps() {
+  local clean_function
+  clean_function="$1"
+  shift
+  for sig; do
+    trap "${clean_function} ${sig}" "${sig}"
+  done
+}
+
+# This function is used by traps() function to clean exit
+exit_script() {
+  ((CTRL_C_COUNT++))
+  if [[ ${CTRL_C_COUNT} == 1 ]]; then
+    local signal
+    signal="$1"
+    if [ "${signal}" == "INT" ]; then
+      echo "*** Warning, this script has been terminated by user: ${USER}!***"
+    fi
+    rm -rf "${RESPONSE_FILE}"
+    # clean exit and use the last exit code
+    exit
+  fi
+}
+
+# This function is used to display the main help message from readme file.
+# Usage: readme [file]
+# Example: readme /docs/README.md
+readme() {
+  local readme_file="${1}"
+
+  if [ -f "${readme_file}" ]; then
+    cat "${readme_file}"
+    echo ""
+  else
+    echo "Error, the readme file ${readme_file} does not exist."
+    exit 1
+  fi
+}
+
+# Print if verbose is enabled and not in scripting mode
+info() {
+  local caller
+  caller="${SCRIPT_NAME}->${FUNCNAME[0]}"
+  if [[ ${VERBOSE} -ge "$1" ]]; then
+    echo "[${caller}]: $2"
+  fi
+}
+
+# Error handling that must exit the script manually
+error() {
+  local caller
+  caller="${SCRIPT_NAME}->${FUNCNAME[0]}"
+  [[ "${SCRIPTING}" == false ]] && echo "[${caller}]: $1" >&2
+  [[ "${SCRIPTING}" == true ]] && echo "error"
+  exit 254
+}
+
+# Handling script simple status
+check_status() {
+  local retval
+  retval="$1"
+  if [[ "${retval}" -eq 0 ]]; then
+    info 3 "[ OK ]"
+  else
+    error "[ FAILED ]"
+  fi
+}
+
+# Prompt user to reconfigure script
+setup_wizard() {
+  local caller
+  caller="${SCRIPT_NAME}->${FUNCNAME[0]}"
+  echo -ne "[${caller}->input]: Do you want to run setup wizard? [y/n]: "
+  read -r answer
+  if [[ "${answer}" == "y" || "${answer}" == "Y" ]]; then
+    # Copy the sample config file from template
+    info 1 "Converting config file into unix format"
+    sed -i 's/\r$//' "${SCRIPT_PATH}/${SCRIPT_NAME}.conf.sample"
+    info 1 "Copying sample config file from template ..."
+    cp -f "${SCRIPT_PATH}/${SCRIPT_NAME}.conf.sample" "${CONFIG_FILE}"
+    retval=$?
+    info 1 "Using config file: ${CONFIG_FILE}"
+    if [ "${retval}" -eq 0 ]; then
+      info 1 "Ok, sample config file copied successfully"
+      echo -ne "Please enter your GREYNOISE API key: "
+      read -r api_key
+      # insert api_key in config file
+      sed -i "s|^GREYNOISE_REPORT_THRESHOLD\=.*|GREYNOISE_REPORT_THRESHOLD=900|" "${CONFIG_FILE}"
+      sed -i "s|^GREYNOISE_OUTPUT_MAX_LIMIT\=.*|GREYNOISE_OUTPUT_MAX_LIMIT=500|" "${CONFIG_FILE}"
+      sed -i "s|^GREYNOISE_API_CHECK_URL\=.*|GREYNOISE_API_CHECK_URL=\"https://api.greynoise.io/v3/community\"|" "${CONFIG_FILE}"
+      sed -i "s|^GREYNOISE_API_KEY\=.*|GREYNOISE_API_KEY=\"${api_key}\"|" "${CONFIG_FILE}"
+      check_status "$?"
+      read_config
+    else
+      error "Sample config file copied failed"
+      exit 1
+    fi
+  else
+    info 1 "Ok, setup wizard skipped"
+  fi
+
+  exit 0
+}
+
+# Read config file
+read_config() {
+  local caller
+
+  caller="${SCRIPT_NAME}->${FUNCNAME[0]}"
+
+  if [[ -z "${CONFIG_FILE}" ]]; then
+    info 2 "Using default config file: ${SCRIPT_PATH}/${SCRIPT_NAME}.conf"
+    CONFIG_FILE="${SCRIPT_PATH}/${SCRIPT_NAME}.conf"
+  else
+    info 2 "Using config file: ${CONFIG_FILE}"
+  fi
+
+  info 2 "Checking config file ${CONFIG_FILE} ..."
+
+  if [[ -f ${CONFIG_FILE} ]]; then
+    sed -i 's/\r$//' "${CONFIG_FILE}"
+    TEST_SOURCE="$(source "${CONFIG_FILE}" 2>&1 >/dev/null)"
+    RETVAL=$?
+    if [[ ${RETVAL} -eq 0 ]]; then
+      source "${CONFIG_FILE}" 2>/dev/null
+      if [[ -z "${GREYNOISE_API_KEY}" ]]; then
+        echo "[${caller}]: Error, the variable GREYNOISE_API_KEY must be set in the config file"
+        setup_wizard
+      fi
+
+    else
+      info 1 "Warning, config file ${CONFIG_FILE} contains invalid syntax"
+      info 2 "Invalid syntax details:"
+      info 2 "${TEST_SOURCE}"
+      mv "${CONFIG_FILE}" "${CONFIG_FILE}".old
+      info 2 "The old configuration file has been backed up as ${CONFIG_FILE}.old"
+      setup_wizard
+    fi
+  else
+    echo "[${caller}]: Warning, config file ${CONFIG_FILE} not found"
+    setup_wizard
+  fi
+
+}
+
+# This is for checking or scanning IP / domain
+scan() {
+
+  local caller ip_lookup previous_output
+
+  local target ip_address noise riot classification name link last_seen message last_scan_date
+
+  caller="${SCRIPT_NAME}->${FUNCNAME[0]}"
+  if [ -z "${TARGET}" ]; then
+    error "No target specified (eg: ${SCRIPT_NAME} check --target 1.2.3.4 or ${SCRIPT_NAME} check --domain example.com)"
+  fi
+
+  ip_lookup=$(resolve "${TARGET}")
+
+  if [[ -z "${ip_lookup}" ]]; then
+    error "[${caller}]: No DNS record found for ${TARGET}"
+  elif [[ "${ip_lookup}" != "${TARGET}" ]]; then
+    info 1 "Using IP address ${ip_lookup} for target, resolved from ${TARGET}"
+  else
+    info 1 "Using IP address ${TARGET} for target"
+  fi
+
+  # Make sure that the output file is limited to GREYNOISE_OUTPUT_MAX_LIMIT (delete the oldest record)
+  if [[ -s "${OUTPUT_FILE}" ]]; then
+    local total_output exceed_count
+    total_output=$(jq -r '.ip' "${OUTPUT_FILE}" | wc -l)
+    info 3 "Total output scan: ${total_output}"
+    if [[ "${total_output}" -ge "${GREYNOISE_OUTPUT_MAX_LIMIT}" ]]; then
+      ((exceed_count = (total_output - GREYNOISE_OUTPUT_MAX_LIMIT)))
+      info 2 "Notice, the output file has reached the maximum output by ${exceed_count} IP(s). Deleting the oldest IP(s) scan result from the output file ..."
+      # Remove the oldest record from exceed count to total output (add plus 1 here to delete 2 times because we will add a new record later)
+      sed -i "1,${exceed_count}d" "${OUTPUT_FILE}"
+    fi
+  fi
+
+  info 0 "Checking target IP address ${ip_lookup} ..."
+
+  target=""
+  ip_address=""
+  noise=""
+  riot=""
+  classification=""
+  name=""
+  link=""
+  last_seen=""
+  message=""
+  last_scan_date=""
+
+  if [[ "${USE_OUTPUT_CACHE}" == "true" ]]; then
+    info 2 "[${caller}]: Output cache enabled, checking previous output"
+    previous_output=$(jq -nr --arg ip_lookup "${ip_lookup}" 'last(inputs | select(.ip_address==$ip_lookup))' "${OUTPUT_FILE}")
+    if [[ "${previous_output}" != "null" ]]; then
+      info 2 "[${caller}]: Previous output found, using cached data"
+      target=$(echo "${previous_output}" | jq -rc '.target')
+      ip_address=$(echo "${previous_output}" | jq -rc '.ip')
+      noise=$(echo "${previous_output}" | jq -rc '.noise')
+      riot=$(echo "${previous_output}" | jq -rc '.riot')
+      classification=$(echo "${previous_output}" | jq -rc '.classification')
+      name=$(echo "${previous_output}" | jq -rc '.name')
+      link=$(echo "${previous_output}" | jq -rc '.link')
+      last_seen=$(echo "${previous_output}" | jq -rc '.last_seen')
+      message=$(echo "${previous_output}" | jq -rc '.message')
+      last_scan_date=$(echo "${previous_output}" | jq -rc '.last_scan_date')
+      # Print the above variables in a neat form
+
+      if [[ VERBOSE -ge 0 ]]; then
+        echo "Greynoise scan results [cache]:"
+        echo "-------------"
+        if [ "${JSON}" == "true" ]; then
+          echo "${previous_output}" | jq -r '.'
+        else
+          echo "Target: ${target}"
+          echo "IP address: ${ip_address}"
+          echo "Noise: ${noise}"
+          echo "Riot: ${riot}"
+          echo "Classification: ${classification}"
+          echo "Name: ${name}"
+          echo "Link: ${link}"
+
+          echo "Last seen: ${last_seen}"
+          echo "Message: ${message}"
+          echo "Last scan date: $(date -d @"${last_scan_date}")"
+
+        fi
+        echo "-------------"
+
+        exit 0
+      else
+        if [[ ${classification} == "benign" ]]; then
+          echo "clean"
+          exit 0
+        elif [[ ${classification} == "malicious" ]]; then
+          echo "malicious"
+          exit 1
+        elif [[ ${classification} == "unknown" ]]; then
+          echo "unknown"
+          exit 2
+        else
+          echo "null"
+          exit 4
+        fi
+      fi
+    else
+      info 2 "[${caller}]: Previous output not found, querying Greynoise API ..."
+    fi
+  else
+    info 2 "[${caller}]: Output cache disabled, skipping previous output check"
+  fi
+
+  # Query new AbuseIPDB API
+  response_code=$(curl -w "%{http_code}" -s -o "${RESPONSE_FILE}" -H "Key: ${GREYNOISE_API_KEY}" -H "Accept: application/json" -G "${GREYNOISE_API_CHECK_URL}/${ip_lookup}")
+  check_status "$?"
+
+  info 3 "Response code is ${response_code}"
+
+  if [ "${response_code}" -eq 200 ]; then
+
+    ip_address=$(jq -rc '.ip' "${RESPONSE_FILE}")
+    noise=$(jq -rc '.noise' "${RESPONSE_FILE}")
+    riot=$(jq -rc '.riot' "${RESPONSE_FILE}")
+    classification=$(jq -rc '.classification' "${RESPONSE_FILE}")
+    name=$(jq -rc '.name' "${RESPONSE_FILE}")
+    link=$(jq -rc '.link' "${RESPONSE_FILE}")
+    last_seen=$(jq -rc '.last_seen' "${RESPONSE_FILE}")
+    message=$(jq -rc '.message' "${RESPONSE_FILE}")
+
+    # Store the result in OUTPUT_FILE as JSON using jq
+    info 3 "Writing to output file ..."
+    jq -cn \
+      --arg target "${TARGET}" \
+      --arg ip_address "${ip_address}" \
+      --argjson noise "${noise}" \
+      --argjson riot "${riot}" \
+      --arg classification "${classification}" \
+      --arg name "${name}" \
+      --arg link "${link}" \
+      --arg last_seen "${last_seen}" \
+      --arg message "${message}" \
+      '{"target": $target, "ip_address": $ip_address, "noise": $noise, "riot": $riot, "classification": $classification, "name": $name, "link": $link, last_seen: $last_seen, message: $message, last_scan_date: now|rint}' >>"${OUTPUT_FILE}"
+
+    # Print the above variables in a neat form
+
+    if [[ VERBOSE -ge 0 ]]; then
+
+      echo "Greynoise scan results [new]:"
+      echo "-------------"
+      if [ "${JSON}" == "true" ]; then
+        jq -r '.' "${RESPONSE_FILE}"
+      else
+        echo "Target: ${TARGET}"
+        echo "IP address: ${ip_address}"
+        echo "Noise: ${noise}"
+        echo "Riot: ${riot}"
+        echo "Classification: ${classification}"
+        echo "Name: ${name}"
+        echo "Link: ${link}"
+        echo "Last seen: ${last_seen}"
+        echo "Message: ${message}"
+        echo "Last scan date: $(date)"
+      fi
+      echo "-------------"
+      exit 0
+    else
+      if [[ ${classification} == "benign" ]]; then
+        echo "clean"
+        exit 0
+      elif [[ ${classification} == "malicious" ]]; then
+        echo "malicious"
+        exit 1
+      elif [[ ${classification} == "unknown" ]]; then
+        echo "unknown"
+        exit 2
+      else
+        echo "null"
+        exit 3
+      fi
+    fi
+  else
+
+    if [[ "${VERBOSE}" -ge 0 ]]; then
+      echo "[${caller}]: Error, API return unsuccessful HTTP code ${response_code}"
+      echo "[${caller}]: Error details:"
+      jq -r '.' "${RESPONSE_FILE}"
+    else
+      echo "error"
+    fi
+    exit 254
+  fi
+
+  rm -f "${RESPONSE_FILE}"
+}
+
+# Resolve a given target to an IP
+resolve() {
+
+  local target
+
+  target="$1"
+  if ipcalc -s -c "${target}"; then
+    echo "${target}"
+    return 0
+  else
+    getent hosts "${target}" | awk '{ print $1 ; exit }'
+  fi
+}
+
+############################
+# MAIN FUNCTION START HERE #
+############################
+
+# This script was tested on Debian 11 (Bullseye)
+
+declare SCRIPT_PATH SCRIPT_NAME SHORT_OPT_SPECS INDEX ACTION ARGNUM RETVAL
+declare -A LONG_OPT_SPECS
+
+SCRIPT_PATH="$(dirname "$(readlink -f "$0")")"
+SCRIPT_NAME=$(basename -- "$0")
+
+OS_TEMP_PATH="/tmp"
+
+mkdir -p "${OS_TEMP_PATH}"
+
+SHORT_OPT_SPECS=":hvsjc:o:kt:-:"
+LONG_OPT_SPECS=(["ip"]=1 ["ip-address"]=1 ["domain"]=1 ["domain-name"]=1 ["config"]=1 ["target"]=1 ["output"]=1)
+INDEX=$(($# + 1))
+
+ACTION="$1"
+ARGNUM="$#"
+RETVAL=0
+
+# This variable will be used as global
+VERBOSE=false
+SCRIPTING=false
+
+# Make sure jq and ipcalc are installed
+# TODO use maxibuild to check this
+
+if ! command -v jq &>/dev/null; then
+  echo "jq could not be found. Please install jq first."
+  exit 1
+fi
+
+if ! command -v ipcalc &>/dev/null; then
+  echo "ipcalc could not be found. Please install ipcalc first."
+  exit 1
+fi
+
+RESPONSE_FILE="$(mktemp)"
+
+traps exit_script QUIT INT TERM EXIT
+
+if [ ${ARGNUM} -eq 0 ]; then
+  error "No argument supplied. Please use '${SCRIPT_NAME} --help' for help"
+  exit 1
+fi
+
+shift
+
+while getopts "${SHORT_OPT_SPECS}" OPTION; do
+  while true; do
+    case "${OPTION}" in
+    -)
+      if [[ ${OPTARG[0]} =~ .*=.* ]]; then
+        OPTION=${OPTARG/=*/}
+        ((${#OPTION} <= 1)) && {
+          echo "[${SCRIPT_NAME}]: Error, invalid long option '${OPTION}'" >&2
+          exit 1
+        }
+        if ((LONG_OPT_SPECS[\$OPTION] != 1)); then
+          echo "[${SCRIPT_NAME}]: Error, the option '${OPTION}' does not support this syntax"
+          exit 2
+        fi
+        OPTARG[0]=${OPTARG#*=}
+      else
+        OPTION="${OPTARG[0]}"
+        ((${#OPTION} <= 1)) && {
+          echo "[${SCRIPT_NAME}]: Error, Invalid long option '${OPTION}'"
+          exit 1
+        }
+        OPTARG=("${@:OPTIND:LONG_OPT_SPECS[\$OPTION]}")
+        ((OPTIND += LONG_OPT_SPECS[\$OPTION]))
+        ((OPTIND > INDEX)) && {
+          echo "[${SCRIPT_NAME}]: Error, missing required arguments for option '${OPTION}'"
+          exit 2
+        }
+      fi
+      continue
+      ;;
+    h | help)
+      ACTION="help"
+      ;;
+    v | verbose)
+      VERBOSE=$((VERBOSE + 1))
+      ;;
+    s | scripting)
+      SCRIPTING=true
+      VERBOSE=-1
+      ;;
+    j | json)
+      JSON=true
+      ;;
+    c | config)
+      CONFIG_FILE="${OPTARG[0]}"
+      ;;
+    o | output)
+      OUTPUT_FILE="${OPTARG[0]}"
+      ;;
+    k | cache)
+      USE_OUTPUT_CACHE=true
+      ;;
+    t | ip | ip-address | domain | domain-name | target)
+      TARGET="${OPTARG[0]}"
+      ;;
+    ?)
+      echo "[${SCRIPT_NAME}]: Syntax error: Unknown short option '${OPTARG[0]}'"
+      exit 2
+      ;;
+    *)
+      echo "[${SCRIPT_NAME}]: Syntax error: Unknown long option '${OPTION}'"
+      exit 2
+      ;;
+    esac
+    break
+  done
+done
+
+if [[ -z "${OUTPUT_FILE}" ]]; then
+  OUTPUT_FILE="${SCRIPT_PATH}/greynoise_check_output.txt"
+fi
+
+info 4 "Creating output file"
+touch "${OUTPUT_FILE}"
+check_status "$?"
+
+info 2 "Output location is ${OUTPUT_FILE}"
+
+read_config
+
+if [[ "${ACTION^^}" == +(-H|--HELP|HELP) ]]; then
+  readme "${SCRIPT_PATH}/readme.txt"
+  RETVAL=$?
+  exit ${RETVAL}
+elif [[ "${ACTION^^}" == +(-V|--VERSION|VERSION) ]]; then
+  echo "=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~="
+  echo ""
+  echo "Info: ${_APP_INFO}"
+  echo ""
+  echo "Version: ${_APP_VERSION_STATUS}"
+  echo ""
+  echo "${_AUTHOR}"
+  echo ""
+  echo "=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~=~="
+  RETVAL=$?
+  exit ${RETVAL}
+elif [[ "${ACTION^^}" == +(-T|--TEST|TEST) ]]; then
+  exit 0
+elif [[ "${ACTION^^}" == +(SCAN|CHECK) ]]; then
+  scan "$@"
+  RETVAL=$?
+  exit ${RETVAL}
+elif [[ "${ACTION^^}" == +(-U|--UPDATE|UPDATE) ]]; then
+  check_update "$@"
+  RETVAL=$?
+  exit ${RETVAL}
+elif [[ "${ACTION^^}" == +(GET-SCRIPT_PATH|SCRIPT-PATH) ]]; then
+  echo "${SCRIPT_PATH}"
+  exit "$?"
+elif [[ "${ACTION^^}" == +(SHOW-OUTPUT|OUTPUT) ]]; then
+  if command -v "nano" &>/dev/null; then
+    nano -c "${OUTPUT_FILE}"
+    exit "$?"
+  else
+    vi "${OUTPUT_FILE}"
+    exit "$?"
+  fi
+else
+  error "Unknown action '${ACTION}'. Please provide a valid action (eg: ${SCRIPT_NAME} +<action> *<option>)"
+fi
