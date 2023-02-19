@@ -50,7 +50,7 @@ greynoise <+ action> <* options>, where + is required and * is optional
 
 List of available actions:
 
-`check`
+`check` or `scan`
 
 ````
         This action is use to query the greynoise.io API. Required option is --target or --ip-address
